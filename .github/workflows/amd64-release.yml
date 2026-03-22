@@ -15,28 +15,44 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Pull Docker Images and Package
+      - name: Pull Docker Images and Package (split if >2GB)
         run: |
           images="${{ github.event.inputs.docker_images }}"
           IFS=',' read -r -a image_array <<< "$images"
           for image in "${image_array[@]}"; do
+            echo "Processing: $image"
             docker pull "${image}" --platform "linux/amd64"
             image_name="${image//\//_}"
             image_name="${image_name//:/_}"
-            docker save "${image}" -o "${image_name}-amd64.tar"
-            gzip -c "${image_name}-amd64.tar" > "${image_name}-amd64.tar.gz"
-            rm "${image_name}-amd64.tar"
+            tar_file="${image_name}-amd64.tar"
+            gz_file="${image_name}-amd64.tar.gz"
+
+            docker save "${image}" -o "${tar_file}"
+            gzip -c "${tar_file}" > "${gz_file}"
+            rm "${tar_file}"
+
+            # 检查文件大小（字节），超过 2GB 则拆分
+            file_size=$(stat -c%s "${gz_file}")
+            if [ $file_size -gt 2147483648 ]; then
+              echo "File ${gz_file} is larger than 2GB, splitting..."
+              split -b 1900M "${gz_file}" "${gz_file}.part-"
+              rm "${gz_file}"
+              echo "Split completed:"
+              ls -lh "${gz_file}.part-"*
+            else
+              echo "File size OK: ${gz_file}"
+            fi
           done
 
-      - name: List generated files (debug step)
+      - name: List generated files
         run: |
-          echo "Preparing docker images list (.tar.gz) files:"
-          find $GITHUB_WORKSPACE -name "*.tar.gz"
+          echo "Generated files:"
+          ls -lh ${{ github.workspace }}/*.tar.gz* || echo "No files found"
           release_name=$(TZ="Asia/Shanghai" date +'%Y-%m-%d %H:%M Build')
           echo "RELEASE_NAME=$release_name" >> $GITHUB_ENV
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@master
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2.2.1
         with:
           tag_name: DockerTarBuilder-AMD64
           name: ${{ env.RELEASE_NAME }} for x86-64
@@ -46,16 +62,6 @@ jobs:
             `docker load -i alpine_latest.tar.gz `
             ### Video teaching
             [![Bilibili](https://img.shields.io/badge/Bilibili-123456?logo=bilibili&logoColor=fff&labelColor=fb7299)](https://www.bilibili.com/video/BV1yyq6YREdF)
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Docker images as release assets
-        uses: softprops/action-gh-release@v2.1.0
-        with:
-          tag_name: DockerTarBuilder-AMD64
-          files: ${{ github.workspace }}/*.tar.gz
-          token: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            ### 若下载的文件是分卷（.tar.gz.part-*），请先合并：
+            ```bash
+            cat 文件名.tar.gz.part-* > 文件名.tar.gz
